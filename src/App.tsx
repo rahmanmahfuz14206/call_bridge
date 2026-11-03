@@ -3,8 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect } from 'react';
-import { io } from 'socket.io-client';
+import React, { useState } from 'react';
 import { getPlayerProfile, PlayerProfile } from './engine/storage';
 import { sound } from './engine/sound';
 import { Lobby } from './components/Lobby';
@@ -29,6 +28,7 @@ export default function App() {
   // Multiplayer configuration
   const [multiplayerRoomCode, setMultiplayerRoomCode] = useState<string>('');
   const [isMultiplayerHost, setIsMultiplayerHost] = useState<boolean>(false);
+  const [multiplayerRounds, setMultiplayerRounds] = useState<number>(5);
 
   // Global modals
   const [showRules, setShowRules] = useState<boolean>(false);
@@ -54,29 +54,17 @@ export default function App() {
     setMode('solo');
   };
 
-  // Create Private Room via Socket
+  // Create Private Room
   const handleCreateRoom = (rounds: number) => {
-    // Initiate socket connection to ask server for room creation
-    const serverUrl = (import.meta as any).env?.VITE_SERVER_URL || window.location.origin;
-    const socket = io(serverUrl);
-    socket.emit('create_room', {
-      playerName: profile.name,
-      avatar: profile.avatar,
-      roundsCount: rounds,
-      allowAiFill: true,
-    });
-
-    socket.on('room_created', ({ roomCode }) => {
-      setMultiplayerRoomCode(roomCode);
-      setIsMultiplayerHost(true);
-      setMode('multiplayer');
-      socket.disconnect();
-    });
+    setMultiplayerRounds(rounds);
+    setMultiplayerRoomCode('');
+    setIsMultiplayerHost(true);
+    setMode('multiplayer');
   };
 
   // Join Existing Private Room
   const handleJoinRoom = (code: string) => {
-    setMultiplayerRoomCode(code);
+    setMultiplayerRoomCode(code.trim().toUpperCase());
     setIsMultiplayerHost(false);
     setMode('multiplayer');
   };
@@ -116,6 +104,7 @@ export default function App() {
         <MultiplayerGameController
           roomCode={multiplayerRoomCode}
           isHost={isMultiplayerHost}
+          roundsCount={multiplayerRounds}
           onExit={() => {
             setProfile(getPlayerProfile());
             setMode('lobby');
