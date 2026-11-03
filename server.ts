@@ -273,10 +273,11 @@ function handleRoomCardPlay(room: ServerRoom, playerId: string, cardId: string) 
 
 // Socket.io Connection Logic
 io.on('connection', (socket: Socket) => {
-  socket.on('create_room', ({ playerName, avatar, roundsCount, allowAiFill }) => {
+  socket.on('create_room', ({ playerId, playerName, avatar, roundsCount }) => {
     const code = generateRoomCode();
+    const uid = playerId || socket.id;
     const player: Player & { socketId: string; hand: Card[] } = {
-      id: socket.id,
+      id: uid,
       name: playerName || 'Player 1',
       avatar: avatar || '🐯',
       isAi: false,
@@ -311,12 +312,30 @@ io.on('connection', (socket: Socket) => {
     broadcastRoomState(room);
   });
 
-  socket.on('join_room', ({ roomCode, playerName, avatar }) => {
+  socket.on('join_room', ({ roomCode, playerId, playerName, avatar }) => {
     const upperCode = (roomCode || '').toUpperCase().trim();
     const room = rooms.get(upperCode);
 
     if (!room) {
       socket.emit('error_message', 'Room not found. Check the code and try again.');
+      return;
+    }
+
+    const uid = playerId || socket.id;
+
+    // Check if this player is already seated in the room (e.g., host or reconnecting player)
+    const existingPlayer = room.players.find((p) => p.id === uid || p.socketId === socket.id);
+    if (existingPlayer) {
+      existingPlayer.socketId = socket.id;
+      existingPlayer.isAi = false;
+      existingPlayer.name = playerName || existingPlayer.name;
+      existingPlayer.avatar = avatar || existingPlayer.avatar;
+      if (existingPlayer.isHost) {
+        room.hostSocketId = socket.id;
+      }
+      socket.join(upperCode);
+      socket.emit('room_joined', { roomCode: upperCode });
+      broadcastRoomState(room);
       return;
     }
 
@@ -332,7 +351,7 @@ io.on('connection', (socket: Socket) => {
 
     const pos = room.players.length as PlayerPosition;
     const newPlayer: Player & { socketId: string; hand: Card[] } = {
-      id: socket.id,
+      id: uid,
       name: playerName || `Player ${pos + 1}`,
       avatar: avatar || '🦅',
       isAi: false,
@@ -352,7 +371,8 @@ io.on('connection', (socket: Socket) => {
   });
 
   socket.on('toggle_ready', ({ roomCode }) => {
-    const room = rooms.get(roomCode);
+    const upperCode = (roomCode || '').toUpperCase().trim();
+    const room = rooms.get(upperCode);
     if (!room) return;
     const player = room.players.find((p) => p.socketId === socket.id);
     if (player && !player.isHost) {
@@ -362,13 +382,14 @@ io.on('connection', (socket: Socket) => {
   });
 
   socket.on('fill_ai', ({ roomCode }) => {
-    const room = rooms.get(roomCode);
+    const upperCode = (roomCode || '').toUpperCase().trim();
+    const room = rooms.get(upperCode);
     if (!room || room.hostSocketId !== socket.id || room.status !== 'waiting') return;
 
     while (room.players.length < 4) {
       const pos = room.players.length as PlayerPosition;
       const aiPlayer: Player & { socketId: string; hand: Card[] } = {
-        id: `ai_${pos}_${Date.now()}`,
+        id: `bot_${pos}_${Date.now()}`,
         name: BOT_NAMES[pos % BOT_NAMES.length],
         avatar: BOT_AVATARS[pos % BOT_AVATARS.length],
         isAi: true,
@@ -386,7 +407,8 @@ io.on('connection', (socket: Socket) => {
   });
 
   socket.on('start_game', ({ roomCode }) => {
-    const room = rooms.get(roomCode);
+    const upperCode = (roomCode || '').toUpperCase().trim();
+    const room = rooms.get(upperCode);
     if (!room || room.hostSocketId !== socket.id) return;
 
     if (room.players.length !== 4) {
@@ -405,7 +427,8 @@ io.on('connection', (socket: Socket) => {
   });
 
   socket.on('place_bid', ({ roomCode, bid }) => {
-    const room = rooms.get(roomCode);
+    const upperCode = (roomCode || '').toUpperCase().trim();
+    const room = rooms.get(upperCode);
     if (!room || room.status !== 'bidding') return;
     const player = room.players.find((p) => p.socketId === socket.id);
     if (!player || player.position !== room.currentTurn) return;
@@ -415,7 +438,8 @@ io.on('connection', (socket: Socket) => {
   });
 
   socket.on('play_card', ({ roomCode, cardId }) => {
-    const room = rooms.get(roomCode);
+    const upperCode = (roomCode || '').toUpperCase().trim();
+    const room = rooms.get(upperCode);
     if (!room || room.status !== 'playing') return;
     const player = room.players.find((p) => p.socketId === socket.id);
     if (!player || player.position !== room.currentTurn) return;
@@ -424,13 +448,27 @@ io.on('connection', (socket: Socket) => {
   });
 
   socket.on('next_round', ({ roomCode }) => {
-    const room = rooms.get(roomCode);
-    if (!room || room.hostSocketId !== socket.id || room.status !== 'round_end') return;
-    startRoundInRoom(room);
+    const upperCode = (roomCode || '').toUpperCase().trim();
+    const room = rooms.get(upperCode);
+    if (!room || room.hostSocketId !== socket.id) return;
+
+    if (room.status === 'match_end') {
+      // Reset match for a fresh game in the same room
+      room.currentRound = 0;
+      room.roundScores = [];
+      room.distributor = 0;
+      room.players.forEach((p) => {
+        room.cumulativeScores[p.id] = 0;
+      });
+      startRoundInRoom(room);
+    } else if (room.status === 'round_end') {
+      startRoundInRoom(room);
+    }
   });
 
   socket.on('send_chat', ({ roomCode, text, isQuickMsg }) => {
-    const room = rooms.get(roomCode);
+    const upperCode = (roomCode || '').toUpperCase().trim();
+    const room = rooms.get(upperCode);
     if (!room) return;
     const player = room.players.find((p) => p.socketId === socket.id);
     if (!player) return;
@@ -456,12 +494,13 @@ io.on('connection', (socket: Socket) => {
           room.players.forEach((p, i) => {
             p.position = i as PlayerPosition;
           });
-          if (room.players.length === 0) {
+          const remainingHumans = room.players.filter((p) => !p.isAi);
+          if (remainingHumans.length === 0) {
             rooms.delete(code);
           } else {
             // Reassign host if host left
             if (room.hostSocketId === socket.id) {
-              const nextHuman = room.players.find((p) => !p.isAi);
+              const nextHuman = remainingHumans[0];
               if (nextHuman) {
                 room.hostSocketId = nextHuman.socketId;
                 nextHuman.isHost = true;
@@ -470,10 +509,12 @@ io.on('connection', (socket: Socket) => {
             broadcastRoomState(room);
           }
         } else {
-          // In game: mark as AI so game continues smoothly without stalling
+          // In game: mark as Bot so game continues smoothly without stalling
           const leavingPlayer = room.players[idx];
           leavingPlayer.isAi = true;
-          leavingPlayer.name += ' (Bot)';
+          if (!leavingPlayer.name.endsWith('(Bot)')) {
+            leavingPlayer.name += ' (Bot)';
+          }
           leavingPlayer.aiDifficulty = 'medium';
           broadcastRoomState(room);
 
